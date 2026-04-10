@@ -19,12 +19,11 @@ from src.models import Document
 from src.store import EmbeddingStore
 
 SAMPLE_FILES = [
-    "data/python_intro.txt",
-    "data/vector_store_notes.md",
-    "data/rag_system_design.md",
-    "data/customer_support_playbook.txt",
-    "data/chunking_experiment_report.md",
-    "data/vi_retrieval_notes.md",
+    "data/01_faq_hoc_vu.txt",
+    "data/02_quy_che_sinh_vien_ktx.txt",
+    "data/03_huong_dan_hoc_bong.txt",
+    "data/04_thuc_tap_khoa_luan_tot_nghiep.txt",
+    "data/05_thu_vien_va_dich_vu_ho_tro.txt",
 ]
 
 
@@ -57,9 +56,23 @@ def load_documents_from_files(file_paths: list[str]) -> list[Document]:
 
 
 def demo_llm(prompt: str) -> str:
-    """A simple mock LLM for manual RAG testing."""
+    """A simple mock LLM for manual RAG testing, with real OpenAI fallback."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key and api_key != "your-api-key-here":
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"[Real LLM Error, falling back] {e}\n\nFallback Preview: {prompt[:200]}..."
+    
     preview = prompt[:400].replace("\n", " ")
-    return f"[DEMO LLM] Generated answer from prompt preview: {preview}..."
+    return f"[MOCK LLM] (No API Key) Preview: {preview}..."
 
 
 def run_manual_demo(question: str | None = None, sample_files: list[str] | None = None) -> int:
@@ -83,6 +96,25 @@ def run_manual_demo(question: str | None = None, sample_files: list[str] | None 
     for doc in docs:
         print(f"  - {doc.id}: {doc.metadata['source']}")
 
+    # Phase 2 improvement: Apply chunking before adding to store
+    from src.chunking import RecursiveChunker
+    chunker = RecursiveChunker(chunk_size=600)
+    
+    chunked_docs: list[Document] = []
+    for doc in docs:
+        chunks = chunker.chunk(doc.content)
+        for i, chunk_text in enumerate(chunks):
+            # Create a new version of the document for each chunk
+            chunked_docs.append(
+                Document(
+                    id=f"{doc.id}_chunk_{i}",
+                    content=chunk_text,
+                    metadata={**doc.metadata, "doc_id": doc.id, "chunk_index": i}
+                )
+            )
+    
+    print(f"Applied RecursiveChunker: Created {len(chunked_docs)} chunks from {len(docs)} files")
+
     load_dotenv(override=False)
     provider = os.getenv(EMBEDDING_PROVIDER_ENV, "mock").strip().lower()
     if provider == "local":
@@ -101,21 +133,32 @@ def run_manual_demo(question: str | None = None, sample_files: list[str] | None 
     print(f"\nEmbedding backend: {getattr(embedder, '_backend_name', embedder.__class__.__name__)}")
 
     store = EmbeddingStore(collection_name="manual_test_store", embedding_fn=embedder)
-    store.add_documents(docs)
+    store.add_documents(chunked_docs)
 
-    print(f"\nStored {store.get_collection_size()} documents in EmbeddingStore")
+    print(f"\nStored {store.get_collection_size()} chunks in EmbeddingStore")
     print("\n=== EmbeddingStore Search Test ===")
-    print(f"Query: {query}")
+    # Safe printing of query for Windows
+    safe_query = query.encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding)
+    print(f"Query: {safe_query}")
+    
     search_results = store.search(query, top_k=3)
     for index, result in enumerate(search_results, start=1):
-        print(f"{index}. score={result['score']:.3f} source={result['metadata'].get('source')}")
-        print(f"   content preview: {result['content'][:120].replace(chr(10), ' ')}...")
+        # Use safe printing for Windows terminals
+        safe_source = str(result['metadata'].get('source')).encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding)
+        print(f"{index}. score={result['score']:.3f} source={safe_source}")
+        
+        safe_content = result['content'][:120].replace('\n', ' ').encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding)
+        print(f"   content preview: {safe_content}...")
 
     print("\n=== KnowledgeBaseAgent Test ===")
     agent = KnowledgeBaseAgent(store=store, llm_fn=demo_llm)
-    print(f"Question: {query}")
+    print(f"Question: {safe_query}")
     print("Agent answer:")
-    print(agent.answer(query, top_k=3))
+    try:
+        answer = agent.answer(query, top_k=3)
+        print(answer.encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding))
+    except Exception as e:
+        print(f"Error generating answer: {e}")
     return 0
 
 
